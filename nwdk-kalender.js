@@ -19,6 +19,7 @@
     this.element = element;
     this.config = JSON.parse(element.getAttribute('data-config') || '{}');
     this.events = [];
+    this.eventsById = {};
     this.categories = [];
     this.init();
   }
@@ -82,18 +83,29 @@
     // Events normalisieren
     this.events = rawEvents.map(function (ev) {
       var cal = ev.CALENDAR_ID || {};
+      // Anmelde-Links aus NOTE extrahieren (event.dokume.app)
+      var note = cal.NOTE || '';
+      var regLinks = [];
+      var linkRegex = /https?:\/\/event\.dokume\.app[^\s"<]*/g;
+      var match;
+      while ((match = linkRegex.exec(note)) !== null) {
+        if (regLinks.indexOf(match[0]) === -1) regLinks.push(match[0]);
+      }
+
       return {
         id: ev.ID,
         title: cal.TITLE || ev.TITLE || '(Ohne Titel)',
         location: cal.LOCATION || '',
         startDate: cal.STARTDATE ? new Date(cal.STARTDATE.replace(' ', 'T')) : null,
         endDate: cal.ENDDATE ? new Date(cal.ENDDATE.replace(' ', 'T')) : null,
-        note: cal.NOTE || '',
+        note: note,
         category: (ev[categoryField] || '').trim(),
         color: cal.COLOR || '#e35138',
         bannerImageId: ev.BANNER_IMAGE_ID,
         logoFileId: ev.LOGO_FILE_ID,
         closingDate: ev.CLOSING_DATE,
+        link: (ev.LINK || '').trim(),
+        registrationLinks: regLinks,
         raw: ev
       };
     });
@@ -111,6 +123,12 @@
       if (ev.category) catSet[ev.category] = true;
     });
     this.categories = Object.keys(catSet).sort();
+
+    // Events-Map für schnellen Zugriff in Detailansicht
+    var self = this;
+    this.events.forEach(function (ev) {
+      self.eventsById[ev.id] = ev;
+    });
 
     this.render();
   };
@@ -136,6 +154,9 @@
 
     // Filter-Events binden
     this.bindFilter();
+
+    // Card-Klick-Events binden
+    this.bindCardClicks();
   };
 
   NWDKKalender.prototype.renderFilter = function () {
@@ -217,7 +238,7 @@
 
     var isoDate = ev.startDate ? ev.startDate.toISOString().slice(0, 10) : '';
 
-    return '<div class="nwdk-card" data-category="' + this.escapeHTML(ev.category) + '" data-date="' + isoDate + '">' +
+    return '<div class="nwdk-card" data-id="' + this.escapeHTML(ev.id) + '" data-category="' + this.escapeHTML(ev.category) + '" data-date="' + isoDate + '">' +
       '<div class="nwdk-card-body">' +
       logoHTML +
       '<div class="nwdk-card-content">' +
@@ -303,6 +324,125 @@
   };
 
   // =========================================================================
+  // Card-Klick → Detailansicht
+  // =========================================================================
+  NWDKKalender.prototype.bindCardClicks = function () {
+    var self = this;
+    var cards = this.element.querySelectorAll('.nwdk-card');
+    cards.forEach(function (card) {
+      card.addEventListener('click', function () {
+        var id = card.getAttribute('data-id');
+        if (id && self.eventsById[id]) {
+          self.showDetail(self.eventsById[id]);
+        }
+      });
+    });
+  };
+
+  NWDKKalender.prototype.showDetail = function (ev) {
+    var self = this;
+    var html = '<style>' + this.getCSS() + '</style>';
+    html += this.renderDetail(ev);
+    this.element.innerHTML = html;
+
+    // Zurück-Button binden
+    var backBtn = this.element.querySelector('.nwdk-detail-back');
+    if (backBtn) {
+      backBtn.addEventListener('click', function () {
+        self.render();
+      });
+    }
+  };
+
+  NWDKKalender.prototype.renderDetail = function (ev) {
+    var html = '<div class="nwdk-detail">';
+
+    // Zurück-Button
+    html += '<button class="nwdk-detail-back">&larr; Zurück zur Übersicht</button>';
+
+    // Banner/Logo
+    if (ev.bannerImageId || ev.logoFileId) {
+      var fileId = ev.bannerImageId || ev.logoFileId;
+      var imgUrl = 'https://api.dokume.net/public.php/file/' + fileId + '/display';
+      html += '<div class="nwdk-detail-banner">' +
+        '<img src="' + imgUrl + '" alt="" loading="lazy"' +
+        ' onerror="this.parentElement.style.display=\'none\'">' +
+        '</div>';
+    }
+
+    // Titel
+    html += '<h2 class="nwdk-detail-title">' + this.escapeHTML(ev.title) + '</h2>';
+
+    // Meta-Infos
+    html += '<div class="nwdk-detail-meta">';
+
+    // Datum & Uhrzeit
+    if (ev.startDate) {
+      var dateStr = this.formatDisplayDate(ev.startDate);
+      var timeStr = this._formatTime(ev.startDate);
+      if (ev.endDate) {
+        var sameDay = ev.startDate.toDateString() === ev.endDate.toDateString();
+        if (sameDay) {
+          dateStr += ', ' + timeStr + ' – ' + this._formatTime(ev.endDate) + ' Uhr';
+        } else {
+          dateStr += ' ' + timeStr + ' Uhr – ' + this.formatDisplayDate(ev.endDate) + ' ' + this._formatTime(ev.endDate) + ' Uhr';
+        }
+      } else {
+        dateStr += ', ' + timeStr + ' Uhr';
+      }
+      html += '<div class="nwdk-detail-row"><span class="nwdk-detail-icon">📅</span> ' + dateStr + '</div>';
+    }
+
+    // Ort
+    if (ev.location) {
+      html += '<div class="nwdk-detail-row"><span class="nwdk-detail-icon">📍</span> ' + this.escapeHTML(ev.location) + '</div>';
+    }
+
+    // Kategorie
+    if (ev.category) {
+      html += '<div class="nwdk-detail-row"><span class="nwdk-detail-icon">🏷️</span> ' + this.escapeHTML(ev.category) + '</div>';
+    }
+
+    // Anmeldefrist
+    if (ev.closingDate) {
+      var closingD = new Date(ev.closingDate.replace(' ', 'T'));
+      html += '<div class="nwdk-detail-row"><span class="nwdk-detail-icon">⏰</span> Anmeldeschluss: ' + this.formatDisplayDate(closingD) + '</div>';
+    }
+
+    html += '</div>'; // .nwdk-detail-meta
+
+    // Beschreibung (NOTE als HTML)
+    if (ev.note) {
+      html += '<div class="nwdk-detail-note">' + ev.note + '</div>';
+    }
+
+    // Anmelde-Links (aus NOTE extrahiert)
+    if (ev.registrationLinks && ev.registrationLinks.length > 0) {
+      html += '<div class="nwdk-detail-actions">';
+      ev.registrationLinks.forEach(function (url) {
+        html += '<a href="' + url + '" target="_blank" rel="noopener" class="nwdk-detail-register-btn">Zur Anmeldung</a>';
+      });
+      html += '</div>';
+    }
+
+    // Externer Link
+    if (ev.link) {
+      html += '<div class="nwdk-detail-link">' +
+        '<a href="' + this.escapeHTML(ev.link) + '" target="_blank" rel="noopener">Weitere Informationen &rarr;</a>' +
+        '</div>';
+    }
+
+    html += '</div>'; // .nwdk-detail
+    return html;
+  };
+
+  NWDKKalender.prototype._formatTime = function (date) {
+    var h = ('0' + date.getHours()).slice(-2);
+    var m = ('0' + date.getMinutes()).slice(-2);
+    return h + ':' + m;
+  };
+
+  // =========================================================================
   // Hilfsfunktionen
   // =========================================================================
   NWDKKalender.prototype.formatDate = function (date) {
@@ -382,6 +522,10 @@
       '.nwdk-card {' +
       '  background: #fff; border: 1px solid rgba(0,0,0,0.125);' +
       '  border-radius: 0.375rem; margin-bottom: 12px; overflow: hidden;' +
+      '  cursor: pointer; transition: box-shadow 0.15s, transform 0.15s;' +
+      '}' +
+      '.nwdk-card:hover {' +
+      '  box-shadow: 0 2px 8px rgba(0,0,0,0.12); transform: translateY(-1px);' +
       '}' +
       '.nwdk-card-body {' +
       '  display: flex; align-items: flex-start; padding: 12px 16px; gap: 14px;' +
@@ -415,6 +559,63 @@
       '.nwdk-empty {' +
       '  padding: 20px; text-align: center; color: #666;' +
       '  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;' +
+      '}' +
+
+      /* Detail-Ansicht */
+      '.nwdk-detail {' +
+      '  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;' +
+      '  background: #fff; border-radius: 8px; padding: 24px;' +
+      '  border: 1px solid #e0e0e0;' +
+      '}' +
+      '.nwdk-detail-back {' +
+      '  display: inline-flex; align-items: center; gap: 6px;' +
+      '  padding: 8px 16px; font-size: 0.95rem; font-weight: 600;' +
+      '  border: 1px solid #ccc; border-radius: 6px; background: #f8f9fa;' +
+      '  cursor: pointer; color: #333; margin-bottom: 16px;' +
+      '  font-family: inherit; transition: background 0.15s;' +
+      '}' +
+      '.nwdk-detail-back:hover { background: #e9ecef; }' +
+      '.nwdk-detail-banner {' +
+      '  margin-bottom: 16px; text-align: center;' +
+      '}' +
+      '.nwdk-detail-banner img {' +
+      '  max-width: 100%; max-height: 200px; object-fit: contain; border-radius: 6px;' +
+      '}' +
+      '.nwdk-detail-title {' +
+      '  font-size: 1.4rem; font-weight: 700; margin: 0 0 12px 0;' +
+      '  color: #222;' +
+      '}' +
+      '.nwdk-detail-meta {' +
+      '  margin-bottom: 16px; padding: 12px 16px;' +
+      '  background: #f8f9fa; border-radius: 6px;' +
+      '}' +
+      '.nwdk-detail-row {' +
+      '  font-size: 0.95rem; color: #444; padding: 4px 0;' +
+      '}' +
+      '.nwdk-detail-icon { margin-right: 6px; }' +
+      '.nwdk-detail-note {' +
+      '  font-size: 0.95rem; line-height: 1.6; color: #333;' +
+      '  margin-bottom: 16px; padding: 12px 0;' +
+      '  border-top: 1px solid #eee;' +
+      '}' +
+      '.nwdk-detail-note a { color: #2b6cb0; text-decoration: underline; }' +
+      '.nwdk-detail-note p { margin: 0 0 8px 0; }' +
+      '.nwdk-detail-actions {' +
+      '  margin-bottom: 12px;' +
+      '}' +
+      '.nwdk-detail-register-btn {' +
+      '  display: inline-block; padding: 10px 24px;' +
+      '  font-size: 1rem; font-weight: 600; color: #fff;' +
+      '  background: #2b6cb0; border-radius: 6px;' +
+      '  text-decoration: none; transition: background 0.15s;' +
+      '  margin-right: 8px;' +
+      '}' +
+      '.nwdk-detail-register-btn:hover { background: #2c5282; }' +
+      '.nwdk-detail-link {' +
+      '  padding-top: 8px;' +
+      '}' +
+      '.nwdk-detail-link a {' +
+      '  color: #2b6cb0; font-size: 0.95rem; text-decoration: underline;' +
       '}';
   };
 
